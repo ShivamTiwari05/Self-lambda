@@ -1,0 +1,64 @@
+import boto3
+import time
+
+# Initialize EC2 client
+ec2_client = boto3.client('ec2', region_name='us-east-1')
+
+def lambda_handler(event, context):
+    """
+    Lambda function to check and encrypt unencrypted EBS volumes.
+    """
+    try:
+        # Get all available EBS volumes
+        volumes = ec2_client.describe_volumes(Filters=[{'Name': 'status', 'Values': ['available']}])
+
+        for volume in volumes['Volumes']:
+            volume_id = volume['VolumeId']
+            encrypted = volume['Encrypted']
+            az = volume['AvailabilityZone']
+
+            if not encrypted:
+                print(f"Volume {volume_id} is not encrypted. Encrypting...")
+
+                # Create a snapshot of the unencrypted volume
+                snapshot = ec2_client.create_snapshot(VolumeId=volume_id, Description="Snapshot for Encryption")
+                snapshot_id = snapshot['SnapshotId']
+
+                # Wait for snapshot to complete
+                wait_for_snapshot(snapshot_id)
+
+                # Create an encrypted volume from the snapshot
+                encrypted_volume = ec2_client.create_volume(
+                    SnapshotId=snapshot_id,
+                    AvailabilityZone=az,
+                    Encrypted=True,
+                    VolumeType=volume['VolumeType'],
+                    TagSpecifications=[{'ResourceType': 'volume', 'Tags': [{'Key': 'Name', 'Value': 'Encrypted_Volume'}]}]
+                )
+                encrypted_volume_id = encrypted_volume['VolumeId']
+
+                print(f"Created encrypted volume: {encrypted_volume_id}")
+
+                # Delete the original unencrypted volume
+                ec2_client.delete_volume(VolumeId=volume_id)
+                print(f"Deleted unencrypted volume: {volume_id}")
+
+        return {"status": "Encryption process completed"}
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {"status": "Failed", "error": str(e)}
+
+def wait_for_snapshot(snapshot_id):
+    """
+    Waits for snapshot to become available before proceeding.
+    """
+    print(f"Waiting for snapshot {snapshot_id} to be completed...")
+    while True:
+        snapshot = ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])
+        state = snapshot['Snapshots'][0]['State']
+        if state == 'completed':
+            print(f"Snapshot {snapshot_id} is ready.")
+            break
+        time.sleep(5)  # Wait and retry
+
